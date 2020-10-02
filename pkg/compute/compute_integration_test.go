@@ -286,6 +286,19 @@ func TestInit(t *testing.T) {
 			},
 			manifestIncludes: `name = "fastly-build`,
 		},
+		{
+			name:       "with AssemblyScript language",
+			args:       []string{"compute", "init", "--language", "assemblyscript"},
+			configFile: config.File{Token: "123"},
+			api: mock.API{
+				GetTokenSelfFn:  tokenOK,
+				GetUserFn:       getUserOk,
+				CreateServiceFn: createServiceOK,
+				CreateDomainFn:  createDomainOK,
+				CreateBackendFn: createBackendOK,
+			},
+			manifestIncludes: `name = "fastly-build`,
+		},
 	} {
 		t.Run(testcase.name, func(t *testing.T) {
 			// We're going to chdir to an init environment,
@@ -346,6 +359,8 @@ func TestInit(t *testing.T) {
 	}
 }
 
+type buildLanguageEnvironmentFn func(t *testing.T, fastlyManifestContent, languageManifestContent, lanuageLockfileContent string) (dir string)
+
 func TestBuild(t *testing.T) {
 	if os.Getenv("TEST_COMPUTE_BUILD") == "" {
 		t.Log("skipping test")
@@ -356,23 +371,26 @@ func TestBuild(t *testing.T) {
 		name                 string
 		args                 []string
 		fastlyManifest       string
-		cargoManifest        string
-		cargoLock            string
+		languageManifest     string
+		languageLockfile     string
+		buildDirFn           buildLanguageEnvironmentFn
 		client               api.HTTPClient
 		wantError            string
 		wantRemediationError string
 		wantOutputContains   string
 	}{
 		{
-			name:      "no fastly.toml manifest",
-			args:      []string{"compute", "build"},
-			client:    versionClient{[]string{"0.0.0"}},
-			wantError: "error reading package manifest: open fastly.toml:", // actual message differs on Windows
+			name:       "no fastly.toml manifest",
+			args:       []string{"compute", "build"},
+			buildDirFn: makeRustBuildEnvironment,
+			client:     versionClient{[]string{"0.0.0"}},
+			wantError:  "error reading package manifest: open fastly.toml:", // actual message differs on Windows
 		},
 		{
 			name:           "empty language",
 			args:           []string{"compute", "build"},
 			fastlyManifest: "name = \"test\"\n",
+			buildDirFn:     makeRustBuildEnvironment,
 			client:         versionClient{[]string{"0.0.0"}},
 			wantError:      "language cannot be empty, please provide a language",
 		},
@@ -380,6 +398,7 @@ func TestBuild(t *testing.T) {
 			name:           "empty name",
 			args:           []string{"compute", "build"},
 			fastlyManifest: "language = \"rust\"\n",
+			buildDirFn:     makeRustBuildEnvironment,
 			client:         versionClient{[]string{"0.0.0"}},
 			wantError:      "name cannot be empty, please provide a name",
 		},
@@ -387,23 +406,26 @@ func TestBuild(t *testing.T) {
 			name:           "unknown language",
 			args:           []string{"compute", "build"},
 			fastlyManifest: "name = \"test\"\nlanguage = \"javascript\"\n",
+			buildDirFn:     makeRustBuildEnvironment,
 			client:         versionClient{[]string{"0.0.0"}},
 			wantError:      "unsupported language javascript",
 		},
 		{
-			name:           "error reading cargo metadata",
-			args:           []string{"compute", "build"},
-			fastlyManifest: "name = \"test\"\nlanguage = \"rust\"\n",
-			cargoManifest:  "[package]\nname = \"test\"",
-			client:         versionClient{[]string{"0.4.0"}},
-			wantError:      "reading cargo metadata",
+			name:             "error reading cargo metadata",
+			args:             []string{"compute", "build"},
+			fastlyManifest:   "name = \"test\"\nlanguage = \"rust\"\n",
+			languageManifest: "[package]\nname = \"test\"",
+			buildDirFn:       makeRustBuildEnvironment,
+			client:           versionClient{[]string{"0.4.0"}},
+			wantError:        "reading cargo metadata",
 		},
 		{
 			name:                 "fastly-sys crate not found",
 			args:                 []string{"compute", "build"},
 			fastlyManifest:       "name = \"test\"\nlanguage = \"rust\"\n",
-			cargoManifest:        "[package]\nname = \"test\"\nversion = \"0.1.0\"\n\n[dependencies]\nfastly = \"=0.3.2\"",
-			cargoLock:            "[[package]]\nname = \"test\"\nversion = \"0.1.0\"\n\n[[package]]\nname = \"fastly\"\nversion = \"0.3.2\"",
+			languageManifest:     "[package]\nname = \"test\"\nversion = \"0.1.0\"\n\n[dependencies]\nfastly = \"=0.3.2\"",
+			languageLockfile:     "[[package]]\nname = \"test\"\nversion = \"0.1.0\"\n\n[[package]]\nname = \"fastly\"\nversion = \"0.3.2\"",
+			buildDirFn:           makeRustBuildEnvironment,
 			client:               versionClient{[]string{"0.4.0"}},
 			wantError:            "fastly-sys crate not found",
 			wantRemediationError: "fastly = \"^0.4.0\"",
@@ -412,16 +434,18 @@ func TestBuild(t *testing.T) {
 			name:                 "fastly-sys crate out-of-date",
 			args:                 []string{"compute", "build"},
 			fastlyManifest:       "name = \"test\"\nlanguage = \"rust\"\n",
-			cargoLock:            "[[package]]\nname = \"fastly-sys\"\nversion = \"0.3.2\"",
+			languageLockfile:     "[[package]]\nname = \"fastly-sys\"\nversion = \"0.3.2\"",
+			buildDirFn:           makeRustBuildEnvironment,
 			client:               versionClient{[]string{"0.4.0"}},
 			wantError:            "fastly crate not up-to-date",
 			wantRemediationError: "fastly = \"^0.4.0\"",
 		},
 		{
-			name:               "success",
+			name:               "Rust success",
 			args:               []string{"compute", "build"},
 			fastlyManifest:     "name = \"test\"\nlanguage = \"rust\"\n",
-			cargoLock:          "[[package]]\nname = \"fastly\"\nversion = \"0.3.2\"\n\n[[package]]\nname = \"fastly-sys\"\nversion = \"0.3.2\"",
+			languageLockfile:   "[[package]]\nname = \"fastly\"\nversion = \"0.3.2\"\n\n[[package]]\nname = \"fastly-sys\"\nversion = \"0.3.2\"",
+			buildDirFn:         makeRustBuildEnvironment,
 			client:             versionClient{[]string{"0.0.0"}},
 			wantOutputContains: "Built rust package test",
 		},
@@ -436,7 +460,7 @@ func TestBuild(t *testing.T) {
 
 			// Create our build environment in a temp dir.
 			// Defer a call to clean it up.
-			rootdir := makeBuildEnvironment(t, testcase.fastlyManifest, testcase.cargoManifest, testcase.cargoLock)
+			rootdir := testcase.buildDirFn(t, testcase.fastlyManifest, testcase.languageManifest, testcase.languageLockfile)
 			defer os.RemoveAll(rootdir)
 
 			// Before running the test, chdir into the build environment.
@@ -903,7 +927,7 @@ func makeInitEnvironment(t *testing.T, manifestContent string) (rootdir string) 
 	return rootdir
 }
 
-func makeBuildEnvironment(t *testing.T, fastlyManifestContent, cargoManifestContent, cargoLockContent string) (rootdir string) {
+func makeRustBuildEnvironment(t *testing.T, fastlyManifestContent, cargoManifestContent, cargoLockContent string) (rootdir string) {
 	t.Helper()
 
 	p := make([]byte, 8)

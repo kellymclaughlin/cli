@@ -25,13 +25,17 @@ import (
 )
 
 type template struct {
-	Name string
-	Path string
+	Name   string
+	Path   string
+	Branch string
+}
+
+type language struct {
+	Name      string
+	Templates []template
 }
 
 const (
-	defaultTemplate       = "https://github.com/fastly/fastly-template-rust-default.git"
-	defaultTemplateBranch = "0.4.0"
 	defaultTopLevelDomain = "edgecompute.app"
 	manageServiceBaseURL  = "https://manage.fastly.com/configure/services/"
 )
@@ -41,10 +45,26 @@ var (
 	domainNameRegEx           = regexp.MustCompile(`(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9][a-z0-9-]{0,61}[a-z0-9]`)
 	fastlyOrgRegEx            = regexp.MustCompile(`^https:\/\/github\.com\/fastly`)
 	fastlyFileIgnoreListRegEx = regexp.MustCompile(`\.github|LICENSE|SECURITY\.md`)
-	defaultTemplates          = map[int]template{
-		1: {
-			Name: "Starter kit",
-			Path: defaultTemplate,
+	languages                 = []language{
+		{
+			"Rust",
+			[]template{
+				{
+					Name:   "Starter kit",
+					Path:   "https://github.com/fastly/fastly-template-rust-default.git",
+					Branch: "0.4.0",
+				},
+			},
+		},
+		{
+			"AssemblyScript",
+			[]template{
+				{
+					Name:   "Starter Kit",
+					Path:   "git@github.com:fastly/fastly-template-assemblyscript-default.git",
+					Branch: "phamann/initial",
+				},
+			},
 		},
 	}
 )
@@ -53,6 +73,7 @@ var (
 type InitCommand struct {
 	common.Base
 	manifest manifest.Data
+	language string
 	from     string
 	branch   string
 	path     string
@@ -70,6 +91,7 @@ func NewInitCommand(parent common.Registerer, globals *config.Data) *InitCommand
 	c.CmdClause.Flag("name", "Name of package, defaulting to directory name of the --path destination").Short('n').StringVar(&c.manifest.File.Name)
 	c.CmdClause.Flag("description", "Description of the package").Short('d').StringVar(&c.manifest.File.Description)
 	c.CmdClause.Flag("author", "Author(s) of the package").Short('a').StringsVar(&c.manifest.File.Authors)
+	c.CmdClause.Flag("language", "Language of the package").Short('l').StringVar(&c.language)
 	c.CmdClause.Flag("from", "Git repository containing package template").Short('f').StringVar(&c.from)
 	c.CmdClause.Flag("branch", "Git branch name to clone from package template repository").Hidden().StringVar(&c.branch)
 	c.CmdClause.Flag("path", "Destination to write the new package, defaulting to the current directory").Short('p').StringVar(&c.path)
@@ -116,6 +138,7 @@ func (c *InitCommand) Exec(in io.Reader, out io.Writer) (err error) {
 		name        string
 		description string
 		authors     []string
+		language    language
 	)
 
 	name, _ = c.manifest.Name()
@@ -187,12 +210,37 @@ func (c *InitCommand) Exec(in io.Reader, out io.Writer) (err error) {
 		}
 	}
 
+	if c.language == "" {
+		text.Output(out, "%s", text.Bold("Language:"))
+		for i, lang := range languages {
+			text.Output(out, "[%d] %s", i+1, lang.Name)
+		}
+		option, err := text.Input(out, "Choose option: [1] ", in, validateLanguageOption)
+		if err != nil {
+			return fmt.Errorf("reading input %w", err)
+		}
+		if option == "" {
+			option = "1"
+		}
+		if i, err := strconv.Atoi(option); err == nil {
+			language = languages[i-1]
+		} else {
+			return fmt.Errorf("selecting language")
+		}
+	} else {
+		for _, l := range languages {
+			if strings.EqualFold(c.language, l.Name) {
+				language = l
+			}
+		}
+	}
+
 	if c.from == "" && !c.manifest.File.Exists() {
 		text.Output(out, "%s", text.Bold("Template:"))
-		for i, template := range defaultTemplates {
-			text.Output(out, "[%d] %s (%s)", i, template.Name, template.Path)
+		for i, template := range language.Templates {
+			text.Output(out, "[%d] %s (%s)", i+1, template.Name, template.Path)
 		}
-		template, err := text.Input(out, "Choose option or type URL: [1] ", in, validateTemplateOptionOrURL)
+		template, err := text.Input(out, "Choose option or type URL: [1] ", in, validateTemplateOptionOrURL(language.Templates))
 		if err != nil {
 			return fmt.Errorf("error reading input %w", err)
 		}
@@ -200,7 +248,7 @@ func (c *InitCommand) Exec(in io.Reader, out io.Writer) (err error) {
 			template = "1"
 		}
 		if i, err := strconv.Atoi(template); err == nil {
-			template = defaultTemplates[i].Path
+			template = language.Templates[i-1].Path
 		}
 		c.from = template
 	}
@@ -322,8 +370,8 @@ func (c *InitCommand) Exec(in io.Reader, out io.Writer) (err error) {
 		defer os.RemoveAll(tempdir)
 
 		var ref plumbing.ReferenceName
-		if c.from == defaultTemplate {
-			ref = plumbing.NewBranchReferenceName(defaultTemplateBranch)
+		if c.from == language.Templates[0].Path {
+			ref = plumbing.NewBranchReferenceName(language.Templates[0].Branch)
 		}
 		if c.branch != "" {
 			ref = plumbing.NewBranchReferenceName(c.branch)
@@ -474,21 +522,37 @@ func tempDir(prefix string) (abspath string, err error) {
 	return abspath, nil
 }
 
-func validateTemplateOptionOrURL(input string) error {
-	msg := "must be a valid option or Git URL"
+func validateLanguageOption(input string) error {
+	errMsg := fmt.Errorf("must be a valid option")
 	if input == "" {
 		return nil
 	}
 	if option, err := strconv.Atoi(input); err == nil {
-		if _, ok := defaultTemplates[option]; !ok {
+		if option > len(languages) {
+			return errMsg
+		}
+		return nil
+	}
+	return errMsg
+}
+
+func validateTemplateOptionOrURL(templates []template) func(string) error {
+	return func(input string) error {
+		msg := "must be a valid option or Git URL"
+		if input == "" {
+			return nil
+		}
+		if option, err := strconv.Atoi(input); err == nil {
+			if option > len(templates) {
+				return fmt.Errorf(msg)
+			}
+			return nil
+		}
+		if !gitRepositoryRegEx.MatchString(input) {
 			return fmt.Errorf(msg)
 		}
 		return nil
 	}
-	if !gitRepositoryRegEx.MatchString(input) {
-		return fmt.Errorf(msg)
-	}
-	return nil
 }
 
 func validateBackend(input string) error {
